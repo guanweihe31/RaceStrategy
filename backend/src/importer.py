@@ -12,7 +12,12 @@ CSV_EXTENSIONS = {".csv"}
 SUPPORTED_EXTENSIONS = EXCEL_EXTENSIONS | CSV_EXTENSIONS
 
 # Columnas que se convertirán a segundos (se crea otra columna *_SECONDS)
-TIME_COLUMNS = ["LAP_TIME", "S1", "S2", "S3", "PIT_TIME", "ELAPSED", "HOUR"]
+TIME_COLUMNS = ["LAP_TIME", "PIT_TIME", "ELAPSED", "HOUR"]
+
+# Sectores: Al Kamel ya trae S1_SECONDS/S2_SECONDS/S3_SECONDS en segundos. Se usan
+# esos valores y, si faltan (columna ausente o celda vacía), se calcula desde
+# S1/S2/S3 en formato M:SS.mmm.
+SECTOR_COLUMNS = ["S1", "S2", "S3"]
 
 # Columnas que se convertirán a número. El resto se mantiene como texto
 # (importante: NUMBER debe seguir siendo texto, "007" != "7").
@@ -162,9 +167,25 @@ def convert_time_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     for column in TIME_COLUMNS:
         if column in df.columns:
-            df[f"{column}_SECONDS"] = df[column].apply(time_to_seconds)
+            df[f"{column}_SECONDS"] = _seconds(df[column])
+
+    for sector in SECTOR_COLUMNS:
+        native = f"{sector}_SECONDS"
+        parsed = (
+            _seconds(df[sector]) if sector in df.columns
+            else pd.Series(float("nan"), index=df.index)
+        )
+        if native in df.columns:
+            df[native] = _seconds(df[native]).fillna(parsed)
+        elif sector in df.columns:
+            df[native] = parsed
 
     return df
+
+
+def _seconds(series: pd.Series) -> pd.Series:
+    """Serie de tiempos (texto, número, time...) -> float en segundos (NaN si no se puede)."""
+    return pd.to_numeric(series.apply(time_to_seconds), errors="coerce").astype(float)
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +266,78 @@ def get_data_info(df: pd.DataFrame) -> dict:
         "missing_values": df.isna().sum().to_dict(),
         "data_types": df.dtypes.astype(str).to_dict(),
     }
+
+
+def _read_number_team(path: Path) -> pd.DataFrame | None:
+    """Solo las columnas NUMBER y TEAM de un archivo (rápido). None si no se puede."""
+    wanted = lambda column: str(column).strip().upper() in {"NUMBER", "TEAM"}  # noqa: E731
+    try:
+        if path.suffix.lower() in EXCEL_EXTENSIONS:
+            df = pd.read_excel(path, usecols=wanted, dtype=str)
+        else:
+            df = None
+            for encoding in ("utf-8-sig", "latin-1"):
+                try:
+                    df = pd.read_csv(
+                        path, sep=None, engine="python", encoding=encoding,
+                        dtype=str, skipinitialspace=True, usecols=wanted,
+                    )
+                    break
+                except UnicodeDecodeError:
+                    continue
+    except Exception:
+        return None
+    if df is None:
+        return None
+    df.columns = [str(c).strip().upper() for c in df.columns]
+    if not {"NUMBER", "TEAM"} <= set(df.columns):
+        return None
+    return df.dropna().apply(lambda col: col.str.strip())
+
+
+def padded_numbers(
+    paths: list[str | Path], extra: dict[str, list[str]] | None = None
+) -> dict[str, set[str]]:
+    """Números con ceros a la izquierda ("007") que usa cada equipo en los archivos
+    de un mismo evento, más los de `extra` (config.PADDED_CAR_NUMBERS).
+
+    Sirve para recuperar el "007" en un archivo que pasó por Excel y lo guardó como
+    "7", sin confundirlo con el 7 de otro equipo.
+    """
+    found: dict[str, set[str]] = {team: set(numbers) for team, numbers in (extra or {}).items()}
+    for path in paths:
+        df = _read_number_team(Path(path))
+        if df is None:
+            continue
+        for number, team in df[["NUMBER", "TEAM"]].drop_duplicates().itertuples(index=False):
+            if len(number) > 1 and number.startswith("0") and number.isdigit():
+                found.setdefault(team, set()).add(number)
+    return found
+
+
+def restore_padded_numbers(
+    df: pd.DataFrame, padded: dict[str, set[str]]
+) -> tuple[pd.DataFrame, list[str]]:
+    """Devuelve a cada coche su número con ceros ("7" -> "007") cuando su equipo usa
+    ese número con ceros en `padded`. Solo se toca el coche de ese equipo: el 7 de
+    otro equipo sigue siendo 7. Devuelve (datos, avisos)."""
+    if not padded or not {"NUMBER", "TEAM"} <= set(df.columns):
+        return df, []
+    df = df.copy()
+    notices: list[str] = []
+    numbers = df["NUMBER"].astype("string")
+    teams = df["TEAM"].astype("string").fillna("")
+    for (number, team), _ in df.groupby([numbers, teams], sort=False):
+        targets = [p for p in padded.get(team, ()) if p != number and p.lstrip("0") == number]
+        if len(targets) != 1:
+            continue
+        rows = (numbers == number) & (teams == team)
+        df.loc[rows, "NUMBER"] = targets[0]
+        notices.append(
+            f"El coche {number} de {team} es en realidad el «{targets[0]}»: el archivo perdió "
+            "los ceros a la izquierda (suele pasar al guardarlo con Excel). Se ha corregido."
+        )
+    return df, notices
 
 
 def separate_shared_numbers(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:

@@ -28,6 +28,13 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 #   WEC_DATA_DIR=/otra/carpeta uvicorn api:app
 DATA_DIR = Path(os.environ.get("WEC_DATA_DIR", PROJECT_ROOT / "data" / "raw"))
 
+# Números con ceros a la izquierda conocidos, por equipo (TEAM tal cual en el CSV).
+# Además de estos, se aprenden solos de los demás archivos del mismo evento; esta lista
+# solo hace falta cuando un evento tiene únicamente archivos guardados con Excel.
+PADDED_CAR_NUMBERS: dict[str, list[str]] = {
+    "Aston Martin Thor Team": ["007", "009"],
+}
+
 CATEGORY_LABELS = {"HYPERCAR": "Hypercar", "LMP2": "LMP2", "LMGT3": "LMGT3"}
 
 # Orígenes del frontend (Vite) autorizados a llamar a la API.
@@ -37,3 +44,23 @@ CORS_ORIGINS = os.environ.get(
 
 # Mínimo de vueltas de ritmo en un stint para ajustar su tendencia (degradación).
 MIN_PACE_LAPS_FOR_DEGRADATION = 5
+
+# ---------------------------------------------------------------------------
+# Análisis de carrera (analysis.py)
+# ---------------------------------------------------------------------------
+# Única bandera que cuenta como vuelta "verde": cualquier otro FLAG_AT_FL
+# (FCY, SC, VSC, FF...) marca la vuelta como neutralizada.
+GREEN_FLAG = "GF"
+
+# Tráfico: ventana (vueltas) de la mediana móvil por sector de cada piloto y
+# umbral (s) a partir del cual un sector más lento que esa mediana es tráfico.
+TRAFFIC_WINDOW = 5
+TRAFFIC_MIN_PERIODS = 3
+TRAFFIC_THRESHOLD = 0.4
+
+# Mínimo de vueltas limpias (verde, sin boxes, sin tráfico) en un stint para
+# calcular su pendiente de degradación.
+MIN_CLEAN_LAPS_FOR_SLOPE = 5
+
+# Nº de vueltas más rápidas que entran en la media "top N" del resumen por piloto.
+TOP_N_LAPS = 10

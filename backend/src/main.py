@@ -10,8 +10,11 @@ from pathlib import Path
 
 import pandas as pd
 
-from config import DATA_DIR
-from importer import SUPPORTED_EXTENSIONS, import_data, separate_shared_numbers
+from config import DATA_DIR, PADDED_CAR_NUMBERS
+from importer import (
+    SUPPORTED_EXTENSIONS, import_data, padded_numbers, restore_padded_numbers,
+    separate_shared_numbers,
+)
 from laps import format_hms, format_lap_time, list_cars, list_categories, mark_pace_laps
 from metrics import best_by_driver, pace_by_driver, session_bests
 
@@ -26,7 +29,12 @@ def with_times(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
 
 def report(path: Path, category: str | None, car: str | None) -> None:
     print(f"\n######## {path.stem} ########")
-    data, notices = separate_shared_numbers(import_data(path))
+    siblings = [p for p in path.parent.iterdir() if p.suffix.lower() in SUPPORTED_EXTENSIONS]
+    data, restored = restore_padded_numbers(
+        import_data(path), padded_numbers(siblings, PADDED_CAR_NUMBERS)
+    )
+    data, notices = separate_shared_numbers(data)
+    notices = restored + notices
     for notice in notices:
         print(f"AVISO: {notice}")
     df = mark_pace_laps(data)

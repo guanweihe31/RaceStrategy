@@ -187,13 +187,23 @@ export function timeFormatLabel(): string {
 // ---------------------------------------------------------------------------
 // Llamadas
 // ---------------------------------------------------------------------------
-async function get<T>(path: string): Promise<T> {
+// Error de la API con el código HTTP (null si ni siquiera hubo conexión).
+export class ApiError extends Error {
+  readonly status: number | null
+  constructor(message: string, status: number | null) {
+    super(message)
+    this.status = status
+  }
+}
+
+export async function get<T>(path: string): Promise<T> {
   let response: Response
   try {
     response = await fetch(`${BASE}${path}`)
   } catch {
-    throw new Error(
+    throw new ApiError(
       `No se pudo conectar con el backend (${BASE}). ¿Está arrancado? Desde la carpeta src: uvicorn api:app --port 8000`,
+      null,
     )
   }
   if (!response.ok) {
@@ -204,14 +214,14 @@ async function get<T>(path: string): Promise<T> {
     } catch {
       // la respuesta no traía JSON: se deja el código de estado
     }
-    throw new Error(detail)
+    throw new ApiError(detail, response.status)
   }
   return (await response.json()) as T
 }
 
-const enc = encodeURIComponent
+export const enc = encodeURIComponent
 // El id de sesión es una ruta ("WEC/2026/Barcelona/FP1.CSV"): se codifica cada tramo.
-const encPath = (path: string) => path.split("/").map(enc).join("/")
+export const encPath = (path: string) => path.split("/").map(enc).join("/")
 
 export const api = {
   sessions: () => get<SessionsResponse>("/api/sessions"),

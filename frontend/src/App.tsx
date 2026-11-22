@@ -11,6 +11,7 @@ import {
 import {
   api,
   formatLapTime,
+  formatSeconds,
   formatSigned,
   setMsSeparator,
   timeFormatLabel,
@@ -24,6 +25,9 @@ import {
   type RankingRow,
   type SessionInfo,
 } from "./api"
+import { useBoxZoom, ZOOM_HINT, type PlotFrame } from "./chartZoom"
+import { RaceAnalysisSection } from "./RaceAnalysis"
+import { loadRaceAnalysis, type AnalysisLap } from "./raceAnalysisData"
 
 // ---------------------------------------------------------------------------
 // Textos e imágenes estáticos (lo demás viene del backend)
@@ -159,6 +163,7 @@ type Series = {
   dashed?: boolean // línea discontinua que une todos sus puntos (tendencia)
   dash?: string // patrón de trazo (stroke-dasharray) para distinguir series del mismo color
   markers?: boolean // false: solo línea, sin puntos
+  scale?: number // tamaño del marcador (1 = normal); p. ej. anillos que resaltan puntos
   points: Point[]
 }
 // Franja de fondo con una etiqueta (p. ej. un stint) entre dos vueltas.
@@ -340,6 +345,7 @@ function LineChart({
   const dragRef = useRef<{ startY: number; view: YView } | null>(null)
   const geom = useRef<Geometry | null>(null)
   const clipId = `clip-${useId().replace(/:/g, "")}`
+  const zoom = useBoxZoom(resetKey)
   const all = series.flatMap((s) => s.points)
   const empty = all.length === 0
 
@@ -378,14 +384,22 @@ function LineChart({
   const plotH = height - pad.top - pad.bottom
 
   const xs = [...all.map((p) => p.x), ...bands.flatMap((b) => [b.from - 0.5, b.to + 0.5])]
-  const ys = all.map((p) => p.y)
-  const minX = Math.min(...xs)
-  const maxX = Math.max(...xs)
+  // Zoom de caja (botón derecho): fija el rango X y, si la caja tenía altura, también el Y.
+  const box = zoom.view
+  const minX = box ? box.x0 : Math.min(...xs)
+  const maxX = box ? box.x1 : Math.max(...xs)
+  const inRange = all.filter((p) => p.x >= minX - 0.5 && p.x <= maxX + 0.5)
+  const ys = (inRange.length ? inRange : all).map((p) => p.y)
   const rawMinY = Math.min(...ys)
   const rawMaxY = Math.max(...ys)
   const margin = (rawMaxY - rawMinY || 1) * 0.08
   const full: YView = { min: rawMinY - margin, max: rawMaxY + margin }
-  const view = interactiveY && yView ? clampView(yView, full) : full
+  const view =
+    box && box.y0 !== null && box.y1 !== null
+      ? { min: box.y0, max: box.y1 }
+      : interactiveY && yView
+        ? clampView(yView, full)
+        : full
   const zoomed = view.max - view.min < full.max - full.min - 1e-9
   const atMaxZoom = view.max - view.min <= MIN_SPAN + 1e-9
   geom.current = { height, padTop: pad.top, padBottom: pad.bottom, full, view }
@@ -410,8 +424,27 @@ function LineChart({
   const panBy = (fraction: number) =>
     setYView(panView(view, full, (view.max - view.min) * fraction))
 
-  // Arrastrar: la gráfica sigue al puntero.
+  const frame: PlotFrame = {
+    width,
+    height,
+    left: pad.left,
+    top: pad.top,
+    plotW,
+    plotH,
+    toX: (px) => minX + ((px - pad.left) / plotW) * (maxX - minX || 1),
+    toY: (py) => maxY - ((py - pad.top) / plotH) * (maxY - minY),
+  }
+  const resetAll = () => {
+    setYView(null)
+    zoom.reset()
+  }
+
+  // Arrastrar: la gráfica sigue al puntero (botón izquierdo); el derecho es el zoom de caja.
   const onPointerDown = (event: ReactPointerEvent<SVGSVGElement>) => {
+    if (zoom.onPointerDown(event, frame)) {
+      setHover(null)
+      return
+    }
     if (!interactiveY || event.button !== 0) return
     dragRef.current = { startY: event.clientY, view }
     setDragging(true)
@@ -419,6 +452,7 @@ function LineChart({
     event.currentTarget.setPointerCapture?.(event.pointerId)
   }
   const onPointerMove = (event: ReactPointerEvent<SVGSVGElement>) => {
+    if (zoom.onPointerMove(event, frame)) return
     const drag = dragRef.current
     if (!drag) return
     const rect = event.currentTarget.getBoundingClientRect()
@@ -427,7 +461,8 @@ function LineChart({
     const delta = (dyUnits / plotH) * (drag.view.max - drag.view.min)
     setYView(panView(drag.view, full, delta))
   }
-  const endDrag = () => {
+  const endDrag = (event: ReactPointerEvent<SVGSVGElement>) => {
+    zoom.onPointerUp(event, frame)
     dragRef.current = null
     setDragging(false)
   }
@@ -453,6 +488,17 @@ function LineChart({
 
   return (
     <>
+      {!interactiveY && zoom.depth > 0 && (
+        <div className="chart-tools" role="group" aria-label="Zoom">
+          <button type="button" onClick={zoom.back}>
+            ← Zoom anterior
+          </button>
+          <button type="button" onClick={resetAll}>
+            Ver todo
+          </button>
+          <span className="chart-tools-hint">{ZOOM_HINT}</span>
+        </div>
+      )}
       {interactiveY && (
         <div className="chart-tools" role="group" aria-label="Zoom y desplazamiento vertical">
           <button
@@ -491,11 +537,11 @@ function LineChart({
           >
             ↓
           </button>
-          <button type="button" onClick={() => setYView(null)} disabled={!zoomed}>
+          <button type="button" onClick={resetAll} disabled={!zoomed && zoom.depth === 0}>
             Ver todo
           </button>
           <span className="chart-tools-hint">
-            Arrastra para moverte · Ctrl + rueda para ampliar · doble clic para ver todo
+            Arrastra para moverte · Ctrl + rueda para ampliar · {ZOOM_HINT}
           </span>
         </div>
       )}
@@ -510,13 +556,15 @@ function LineChart({
           onPointerMove={onPointerMove}
           onPointerUp={endDrag}
           onPointerCancel={endDrag}
-          onDoubleClick={() => setYView(null)}
+          onDoubleClick={resetAll}
+          onContextMenu={zoom.onContextMenu}
         >
           <defs>
             <clipPath id={clipId}>
               <rect x={pad.left} y={pad.top} width={plotW} height={plotH} />
             </clipPath>
           </defs>
+          <g clipPath={`url(#${clipId})`}>
           {bands.map((b, i) => {
             const x1 = sx(b.from - 0.5)
             const x2 = sx(b.to + 0.5)
@@ -541,6 +589,7 @@ function LineChart({
               </g>
             )
           })}
+          </g>
           {yTicks.map((t) => (
             <g key={`y${t}`}>
               <line
@@ -596,7 +645,7 @@ function LineChart({
             </g>
           ))}
 
-          <g clipPath={interactiveY ? `url(#${clipId})` : undefined}>
+          <g clipPath={`url(#${clipId})`}>
             {series.map(
               (s) =>
                 s.line &&
@@ -639,7 +688,7 @@ function LineChart({
                           shape={s.shape}
                           x={sx(p.x)}
                           y={sy(p.y)}
-                          r={isHover ? 5.4 : 3.6}
+                          r={(isHover ? 5.4 : 3.6) * (s.scale ?? 1)}
                           color={s.color}
                         />
                         <circle
@@ -686,6 +735,7 @@ function LineChart({
               />
             </g>
           )}
+          {zoom.selection && <rect className="zoom-box" {...zoom.selection} />}
         </svg>
 
         {hovered && tooltip && (
@@ -724,6 +774,7 @@ function LineChart({
           </div>
         )}
       </div>
+      {!interactiveY && zoom.depth === 0 && <p className="zoom-hint">{ZOOM_HINT}</p>}
     </>
   )
 }
@@ -1175,10 +1226,39 @@ function MetricCard({
 }
 
 // Evolución del ritmo de un piloto durante sus stints (vuelta en X, tiempo en Y).
-function StintPanel({ data, overall }: { data: CarData; overall: boolean }) {
+// Filtros del gráfico de stint: qué vueltas no de ritmo se muestran.
+type LapKind = "neutralized" | "in" | "out" | "slow"
+const LAP_KIND_LABELS: Record<LapKind, string> = {
+  in: "Entradas a boxes",
+  out: "Salidas de boxes",
+  neutralized: "FCY / Safety Car",
+  slow: "Lentas (sin bandera)",
+}
+const IN_LAP_STYLE = { color: "#7B91AD", shape: "ring" as Shape }
+const OUT_LAP_STYLE = { color: "#A9BCD2", shape: "triangle" as Shape }
+const TRAFFIC_COLOR = "#FF8A3D"
+
+function StintPanel({
+  data,
+  overall,
+  analysisLaps,
+}: {
+  data: CarData
+  overall: boolean
+  // vueltas del coche según /analysis/laps (tráfico, FLAG_AT_FL, PIT_TIME); sin ellas
+  // se usan los campos de CarLap y no se puede resaltar el tráfico
+  analysisLaps?: AnalysisLap[]
+}) {
   const [driver, setDriver] = useState(data.drivers[0]?.name ?? "")
   const [showTrend, setShowTrend] = useState(false)
-  const [showExcluded, setShowExcluded] = useState(false)
+  const [shown, setShown] = useState<Record<LapKind, boolean>>({
+    in: false,
+    out: false,
+    neutralized: false,
+    slow: false,
+  })
+  const [highlightTraffic, setHighlightTraffic] = useState(true)
+  const hasTraffic = !!analysisLaps?.length
 
   const index = Math.max(0, data.drivers.findIndex((d) => d.name === driver))
   const color = DRIVER_PALETTE[index % DRIVER_PALETTE.length]
@@ -1187,7 +1267,19 @@ function StintPanel({ data, overall }: { data: CarData; overall: boolean }) {
 
   const series = useMemo<Series[]>(() => {
     const laps = data.laps.filter((l) => l.driver === driver)
-    const toPoint = (l: (typeof laps)[number]): Point[] =>
+    const byLap = new Map((analysisLaps ?? []).map((a) => [a.lap, a]))
+    // Tipos de cada vuelta. Una vuelta puede tener varios (FCY + entrada a boxes) y
+    // solo se muestra si todos sus tipos están activados.
+    const kinds = (l: (typeof laps)[number]): LapKind[] => {
+      const a = byLap.get(l.lap)
+      const out: LapKind[] = []
+      if (a ? a.is_neutralized : l.flag !== "") out.push("neutralized")
+      if (a?.is_in_lap || l.pit === "in") out.push("in")
+      if (a?.is_out_lap || l.pit === "out") out.push("out")
+      if (!out.length && !l.isPace) out.push("slow")
+      return out
+    }
+    const toPoint = (l: (typeof laps)[number], extra = ""): Point[] =>
       l.seconds === null
         ? []
         : [
@@ -1195,9 +1287,17 @@ function StintPanel({ data, overall }: { data: CarData; overall: boolean }) {
               x: l.lap,
               y: l.seconds,
               who: driver,
-              note: `${overall ? `${where(l)} · ` : ""}Stint ${l.stint} · vuelta ${l.stintLap} del stint${l.isPace ? "" : ` · ${l.status}`}`,
+              note: [
+                `${overall ? `${where(l)} · ` : ""}Stint ${l.stint} · vuelta ${l.stintLap} del stint`,
+                l.isPace ? "" : l.status,
+                extra,
+              ]
+                .filter(Boolean)
+                .join(" · "),
             },
           ]
+    const visible = laps.filter((l) => kinds(l).every((k) => shown[k]))
+    const pace = visible.filter((l) => kinds(l).length === 0)
     const out: Series[] = [
       {
         id: "pace",
@@ -1205,9 +1305,56 @@ function StintPanel({ data, overall }: { data: CarData; overall: boolean }) {
         color,
         shape,
         line: true,
-        points: markBest(laps.filter((l) => l.isPace).flatMap(toPoint)),
+        points: markBest(pace.flatMap((l) => toPoint(l))),
       },
     ]
+    // Vueltas no de ritmo visibles, agrupadas por su tipo principal.
+    const groups = new Map<string, Series>()
+    for (const l of visible) {
+      const [kind] = kinds(l)
+      if (!kind) continue
+      const a = byLap.get(l.lap)
+      let key: string = kind
+      let style: { color: string; shape: Shape }
+      let label = LAP_KIND_LABELS[kind]
+      if (kind === "neutralized") {
+        const code = l.flag || (a?.flag && a.flag !== "GF" ? a.flag : "FCY")
+        const info = flagInfo(code)
+        key = `flag-${code}`
+        label = `${code} · ${info.name}`
+        style = info
+      } else if (kind === "in") style = IN_LAP_STYLE
+      else if (kind === "out") style = OUT_LAP_STYLE
+      else style = { color: EXCLUDED_COLOR, shape: "cross" }
+      const pitNote = a?.pit_time != null ? `Pit lane ${formatSeconds(a.pit_time)} s` : ""
+      const group = groups.get(key) ?? {
+        id: `kind-${key}`,
+        label,
+        ...style,
+        line: false,
+        points: [],
+      }
+      group.points.push(...toPoint(l, pitNote))
+      groups.set(key, group)
+    }
+    out.push(...groups.values())
+    // Tráfico: anillo naranja alrededor de las vueltas visibles con pérdida estimada.
+    if (highlightTraffic && hasTraffic) {
+      const traffic = visible.flatMap((l) => {
+        const loss = byLap.get(l.lap)?.traffic_loss ?? 0
+        return loss > 0 ? toPoint(l, `Tráfico: ${formatSigned(loss)} s estimados`) : []
+      })
+      if (traffic.length)
+        out.push({
+          id: "traffic",
+          label: "Vuelta con tráfico",
+          color: TRAFFIC_COLOR,
+          shape: "ring",
+          line: false,
+          scale: 1.9,
+          points: traffic,
+        })
+    }
     if (showTrend) {
       for (const stint of stints) {
         if (!stint.trend) continue
@@ -1231,17 +1378,9 @@ function StintPanel({ data, overall }: { data: CarData; overall: boolean }) {
         })
       }
     }
-    if (showExcluded)
-      out.push(
-        ...excludedGroups(
-          laps,
-          (l) => l.lap,
-          (l) => [overall ? where(l) : "", `Stint ${l.stint} · vuelta ${l.stintLap} del stint`],
-        ),
-      )
     return out
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data, driver, showTrend, showExcluded])
+  }, [data, driver, showTrend, shown, highlightTraffic, analysisLaps])
 
   const bands: Band[] = stints.map((s) => ({
     from: s.startLap,
@@ -1283,13 +1422,30 @@ function StintPanel({ data, overall }: { data: CarData; overall: boolean }) {
             />
             Tendencia por stint
           </label>
-          <label className="check">
+          <span className="stint-controls-sep" aria-hidden="true" />
+          <span className="stint-controls-label">Mostrar:</span>
+          {(["in", "out", "neutralized", "slow"] as LapKind[]).map((kind) => (
+            <label className="check" key={kind}>
+              <input
+                type="checkbox"
+                checked={shown[kind]}
+                onChange={(event) => setShown({ ...shown, [kind]: event.target.checked })}
+              />
+              {LAP_KIND_LABELS[kind]}
+            </label>
+          ))}
+          <span className="stint-controls-sep" aria-hidden="true" />
+          <label
+            className="check"
+            title={hasTraffic ? undefined : "Necesita el backend de análisis de carrera conectado"}
+          >
             <input
               type="checkbox"
-              checked={showExcluded}
-              onChange={(event) => setShowExcluded(event.target.checked)}
+              checked={highlightTraffic && hasTraffic}
+              disabled={!hasTraffic}
+              onChange={(event) => setHighlightTraffic(event.target.checked)}
             />
-            Mostrar vueltas excluidas
+            Resaltar tráfico
           </label>
         </div>
         <div className="stint-body">
@@ -1308,7 +1464,11 @@ function StintPanel({ data, overall }: { data: CarData; overall: boolean }) {
           />
           <p className="chart-note">
             Las franjas marcan cada stint: desde la vuelta de salida de boxes hasta la de
-            entrada. El círculo blanco señala la mejor vuelta.
+            entrada. El círculo blanco señala la mejor vuelta.{" "}
+            {hasTraffic
+              ? "El anillo naranja marca las vueltas con tráfico: algún sector más de 0,4 s por encima de la mediana de 5 vueltas del piloto."
+              : "El tráfico se resalta cuando el análisis de carrera del backend está disponible (no en «Todas las sesiones»)."}{" "}
+            FCY / Safety Car = cualquier FLAG_AT_FL distinto de GF.
           </p>
 
           <div className="table-scroll stint-table">
@@ -1470,6 +1630,18 @@ function Dashboard({
   const car = useApi(
     selectedCar ? () => api.car(sessionId, selectedCar, slow) : null,
     [sessionId, selectedCar, slow],
+  )
+  // Análisis de carrera (tráfico, gaps, degradación en aire limpio): solo sesiones concretas.
+  const race = useApi(
+    overall ? null : () => loadRaceAnalysis(sessionId, category),
+    [sessionId, category, overall],
+  )
+  const carAnalysisLaps = useMemo(
+    () =>
+      race.data?.source === "api" && selectedCar
+        ? race.data.laps.filter((l) => l.car === selectedCar)
+        : undefined,
+    [race.data, selectedCar],
   )
 
   // Coche por defecto: el más rápido de la categoría.
@@ -1935,7 +2107,21 @@ function Dashboard({
         </section>
 
         {car.data && <PitPanel key={`pit-${car.data.car.number}`} data={car.data} />}
-        {car.data && <StintPanel key={car.data.car.number} data={car.data} overall={overall} />}
+        {car.data && (
+          <StintPanel
+            key={car.data.car.number}
+            data={car.data}
+            overall={overall}
+            analysisLaps={carAnalysisLaps}
+          />
+        )}
+        <RaceAnalysisSection
+          state={race}
+          overall={overall}
+          focusCar={selectedCar}
+          categoryLabel={data.category.label}
+          sessionName={sessionName}
+        />
       </main>
       <Footer sessionName={sessionName} eventName={eventName} />
     </div>
