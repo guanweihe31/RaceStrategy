@@ -22,10 +22,69 @@ export type SessionInfo = {
   eventName: string
   categories: string[] | null
 }
+// Cualquier archivo de la carpeta de datos, con su tipo:
+//   analysis = vuelta a vuelta (se analiza) · classification = foto de la clasificación
+export type DataFile = {
+  id: string
+  name: string
+  event: string
+  eventName: string
+  kind: "analysis" | "classification" | "unknown"
+  categories: string[] | null
+  sizeKb: number
+}
+export type ClassificationEvent = { event: string; eventName: string; files: number }
 export type SessionsResponse = {
   sessions: SessionInfo[]
+  files?: DataFile[] // (backends antiguos no lo envían)
+  classifications?: ClassificationEvent[]
   settings: Settings
   dataDir: string
+}
+
+// Selección libre de archivos de vueltas: un id normal si es uno, si no "__sel__:id1|id2".
+export const SELECTION_PREFIX = "__sel__:"
+export function selectionId(ids: string[]): string {
+  return ids.length === 1 ? ids[0] : SELECTION_PREFIX + ids.join("|")
+}
+export function selectionIds(session: string): string[] | null {
+  return session.startsWith(SELECTION_PREFIX)
+    ? session.slice(SELECTION_PREFIX.length).split("|").filter(Boolean)
+    : null
+}
+
+// Clasificación por horas (/api/events/{evento}/classification)
+export type ClassificationSnapshot = {
+  hour: number
+  position: number | null
+  classPosition: number
+  laps: number | null
+  status: string
+  totalTime: number | null
+  gapFirst: string
+  gapSeconds: number | null
+  lapsDown: number
+  leaderDelta: number | null // tiempo total − vueltas × ritmo medio del líder de su clase
+  bestLap: TimeValue
+  bestLapNumber: number | null
+}
+export type ClassificationCar = {
+  number: string
+  team: string
+  vehicle: string
+  category: string
+  tyres: string
+  drivers: string[]
+  finalPosition: number | null
+  snapshots: ClassificationSnapshot[]
+}
+export type ClassificationData = {
+  event: string
+  eventName: string
+  hours: number[]
+  categories: { id: string; label: string }[]
+  notices: string[]
+  cars: ClassificationCar[]
 }
 
 export type Best = TimeValue & {
@@ -225,6 +284,8 @@ export const encPath = (path: string) => path.split("/").map(enc).join("/")
 
 export const api = {
   sessions: () => get<SessionsResponse>("/api/sessions"),
+  classification: (event: string) =>
+    get<ClassificationData>(`/api/events/${encPath(event)}/classification`),
   overview: (session: string) =>
     get<Overview>(`/api/sessions/${encPath(session)}/overview`),
   category: (session: string, category: string, slow: number) =>

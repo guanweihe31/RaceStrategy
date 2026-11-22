@@ -35,6 +35,9 @@ export function TraceChart({
   formatTick,
   limit = null,
   tooltip,
+  includeZero = true,
+  integerTicks = false,
+  bottomNote = "por detrás ↓",
 }: {
   lines: TraceLine[]
   bands?: TraceBand[]
@@ -46,6 +49,9 @@ export function TraceChart({
   formatTick: (t: number) => string
   limit?: number | null // recorta el eje Y a ±limit (s)
   tooltip: (x: number) => ReactNode
+  includeZero?: boolean // false: el eje Y se ajusta a los datos (p. ej. posiciones 1..N)
+  integerTicks?: boolean // solo marcas enteras positivas en Y (posiciones)
+  bottomNote?: string
 }) {
   const zoom = useBoxZoom(resetKey)
   const [hoverX, setHoverX] = useState<number | null>(null)
@@ -63,8 +69,12 @@ export function TraceChart({
   const values = lines.flatMap((l) =>
     l.points.filter((p) => p.x >= xMin && p.x <= xTop).map((p) => p.y),
   )
-  let yMin = Math.min(0, ...values)
-  let yMax = Math.max(0, ...values)
+  let yMin = includeZero ? Math.min(0, ...values) : Math.min(...values)
+  let yMax = includeZero ? Math.max(0, ...values) : Math.max(...values)
+  if (!values.length) {
+    yMin = 0
+    yMax = 1
+  }
   if (limit !== null) {
     yMin = Math.max(yMin, -limit)
     yMax = Math.min(yMax, limit)
@@ -89,7 +99,8 @@ export function TraceChart({
     toX: (px) => xMin + ((px - pad.left) / plotW) * (xTop - xMin),
     toY: (py) => yMin + ((py - pad.top) / plotH) * (yMax - yMin),
   }
-  const yTicks = ticks(yMin, yMax, 6)
+  const yTicks = ticks(yMin, yMax, 6).filter((t) => !integerTicks || (Number.isInteger(t) && t > 0))
+  if (integerTicks && yMin <= 1 && !yTicks.includes(1)) yTicks.unshift(1) // P1 siempre visible
   const xTicks = ticks(Math.ceil(xMin), Math.floor(xTop), 14).filter(
     (t) => Number.isInteger(t) && sx(t) < width - pad.right - 100,
   )
@@ -191,7 +202,7 @@ export function TraceChart({
             {xLabel}
           </text>
           <text x={pad.left + 4} y={height - pad.bottom - 6} fill="#62758a" fontSize="10">
-            por detrás ↓
+            {bottomNote}
           </text>
 
           <g clipPath={`url(#${clipId})`}>

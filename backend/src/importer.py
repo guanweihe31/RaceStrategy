@@ -257,6 +257,32 @@ def read_categories(file_path: str | Path) -> list[str] | None:
     return sorted(df.iloc[:, 0].dropna().str.strip().unique().tolist())
 
 
+def file_kind(file_path: str | Path) -> str:
+    """Tipo de archivo de Al Kamel según su cabecera:
+      "analysis"        vuelta a vuelta (…_Analysis_….CSV): lo que analiza la app
+      "classification"  foto de la clasificación (…_Classification_….CSV, p. ej. por horas)
+      "unknown"         cualquier otra cosa
+    """
+    path = Path(file_path)
+    try:
+        if path.suffix.lower() in EXCEL_EXTENSIONS:
+            header = pd.read_excel(path, nrows=0).columns
+        else:
+            with open(path, "rb") as handle:
+                first = handle.readline()
+            text = first.decode("utf-8-sig", errors="replace")
+            separator = max([";", ",", "\t"], key=text.count)
+            header = text.split(separator)
+    except Exception:
+        return "unknown"
+    columns = {str(c).strip().upper().replace(" ", "_") for c in header}
+    if {"NUMBER", "LAP_NUMBER", "LAP_TIME"} <= columns:
+        return "analysis"
+    if {"POSITION", "NUMBER", "LAPS", "TOTAL_TIME"} <= columns:
+        return "classification"
+    return "unknown"
+
+
 def get_data_info(df: pd.DataFrame) -> dict:
     """Resumen básico del DataFrame importado."""
     return {

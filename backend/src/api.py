@@ -26,8 +26,9 @@ from analysis import (
     gap_to_reference,
 )
 from degradation import stint_degradation
+from classification import drivers_of, load_classification
 from importer import (
-    SUPPORTED_EXTENSIONS, import_data, padded_numbers, read_categories,
+    SUPPORTED_EXTENSIONS, file_kind, import_data, padded_numbers, read_categories,
     restore_padded_numbers, separate_shared_numbers,
 )
 from laps import (
@@ -102,8 +103,56 @@ def _overall_event(session: str) -> str | None:
     return None
 
 
-def _event_files(event: str) -> list[Path]:
-    return [p for sid, p in _session_files().items() if _event_of(sid) == event]
+# Selección libre de archivos (de uno o varios eventos): "__sel__:id1|id2|...".
+# "|" no puede aparecer en un nombre de archivo de Windows.
+SELECTION_PREFIX = "__sel__:"
+SELECTION_NAME = "Selección"
+
+
+@lru_cache(maxsize=256)
+def _kind_cached(path: str, modified: float) -> str:
+    return file_kind(path)
+
+
+def _kind(path: Path) -> str:
+    return _kind_cached(str(path), path.stat().st_mtime)
+
+
+def _event_files(event: str, kind: str | None = "analysis") -> list[Path]:
+    """Archivos de un evento; por defecto solo los vuelta a vuelta (los que se analizan)."""
+    return [
+        p for sid, p in _session_files().items()
+        if _event_of(sid) == event and (kind is None or _kind(p) == kind)
+    ]
+
+
+def _selection_ids(session: str) -> list[str] | None:
+    if not session.startswith(SELECTION_PREFIX):
+        return None
+    return [s for s in session[len(SELECTION_PREFIX):].split("|") if s]
+
+
+def _multi_paths(session: str) -> list[Path] | None:
+    """Archivos de una sesión virtual (todas las de un evento o una selección);
+    None si `session` es un archivo normal."""
+    event = _overall_event(session)
+    if event is not None:
+        return _event_files(event)
+    ids = _selection_ids(session)
+    if ids is None:
+        return None
+    files = _session_files()
+    paths = []
+    for sid in dict.fromkeys(ids):
+        path = files.get(sid)
+        if path is None:
+            raise HTTPException(404, f"No existe el archivo «{sid}».")
+        if _kind(path) != "analysis":
+            raise HTTPException(
+                422, f"«{path.name}» no es un archivo de vueltas (Analysis): no se puede analizar."
+            )
+        paths.append(path)
+    return paths
 
 
 def _load(path: str, modified: float) -> tuple[pd.DataFrame, list[str]]:
@@ -166,11 +215,13 @@ def _overall(signature: tuple[tuple[str, float], ...], slow_pct: int) -> pd.Data
 
 
 def _session_data(session: str, slow_pct: int = DEFAULT_SLOW_PCT) -> pd.DataFrame:
-    event = _overall_event(session)
-    if event is not None:
-        files = _event_files(event)
+    files = _multi_paths(session)
+    if files is not None and len(files) == 1:  # selección de un solo archivo
+        session = next(sid for sid, p in _session_files().items() if p == files[0])
+        files = None
+    if files is not None:
         if len(files) < 2:
-            raise HTTPException(404, "Para ver todas las sesiones hace falta más de un archivo.")
+            raise HTTPException(404, "Para juntar sesiones hace falta más de un archivo de vueltas.")
         signature = tuple((str(p), p.stat().st_mtime) for p in files)
         try:
             return _overall(signature, slow_pct)
@@ -180,6 +231,12 @@ def _session_data(session: str, slow_pct: int = DEFAULT_SLOW_PCT) -> pd.DataFram
     path = _session_files().get(session)
     if path is None:
         raise HTTPException(404, f"No existe la sesión «{session}».")
+    if _kind(path) != "analysis":
+        raise HTTPException(
+            422,
+            f"«{path.name}» no es un archivo de vueltas (Analysis). Las clasificaciones por "
+            "horas se ven en «Clasificación por horas».",
+        )
     try:
         return _marked(str(path), path.stat().st_mtime, slow_pct)
     except Exception as error:  # mensaje legible para la interfaz
@@ -201,9 +258,23 @@ def _session_categories(path: Path) -> list[str] | None:
 
 
 def _session_notices(session: str) -> list[str]:
-    event = _overall_event(session)
-    paths = _event_files(event) if event is not None else [_session_files()[session]]
+    paths = _multi_paths(session) or [_session_files()[session]]
     return [n for p in paths for n in _load(str(p), p.stat().st_mtime)[1]]
+
+
+def _session_identity(session: str) -> tuple[str, str, bool]:
+    """(nombre, evento, ¿junta varios archivos?) de cualquier tipo de sesión."""
+    event = _overall_event(session)
+    if event is not None:
+        return OVERALL_NAME, event, True
+    ids = _selection_ids(session)
+    if ids is not None:
+        if len(ids) == 1:
+            return Path(ids[0]).stem, _event_of(ids[0]), False
+        events = {_event_of(sid) for sid in ids}
+        event = events.pop() if len(events) == 1 else "."
+        return f"{SELECTION_NAME} ({len(ids)} archivos)", event, True
+    return Path(session).stem, _event_of(session), False
 
 
 # ---------------------------------------------------------------------------
@@ -357,10 +428,25 @@ def _pace_points(df: pd.DataFrame, car: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 @app.get("/api/sessions")
 def sessions() -> dict:
-    """Sesiones disponibles y ajustes que necesita el frontend."""
+    """Sesiones disponibles (archivos vuelta a vuelta), todos los archivos con su tipo
+    (para elegir cuáles analizar), eventos con clasificaciones por horas y ajustes."""
     by_event: dict[str, list[dict]] = {}
+    files: list[dict] = []
+    classifications: dict[str, int] = {}
     for name, path in _session_files().items():
         event = _event_of(name)
+        kind = _kind(path)
+        files.append(
+            {
+                "id": name, "name": path.stem, "event": event, "eventName": _event_name(event),
+                "kind": kind, "categories": _session_categories(path) if kind == "analysis" else None,
+                "sizeKb": round(path.stat().st_size / 1024),
+            }
+        )
+        if kind == "classification":
+            classifications[event] = classifications.get(event, 0) + 1
+        if kind != "analysis":
+            continue
         by_event.setdefault(event, []).append(
             {
                 "id": name,
@@ -387,6 +473,11 @@ def sessions() -> dict:
             )
     return {
         "sessions": items,
+        "files": files,
+        "classifications": [
+            {"event": event, "eventName": _event_name(event), "files": count}
+            for event, count in classifications.items()
+        ],
         "settings": {"msSeparator": MS_SEPARATOR, "slowThresholdPct": DEFAULT_SLOW_PCT},
         "dataDir": str(DATA_DIR),
     }
@@ -396,8 +487,7 @@ def sessions() -> dict:
 def overview(session: str) -> dict:
     """Resumen de la sesión y de cada categoría (pantalla de inicio)."""
     df = _session_data(session)
-    overall = _overall_event(session) is not None
-    event = _overall_event(session) if overall else _event_of(session)
+    name, event, overall = _session_identity(session)
     categories = []
     for category in list_categories(df):
         data = df[df["CLASS"] == category]
@@ -414,7 +504,7 @@ def overview(session: str) -> dict:
     return {
         "session": {
             "id": session,
-            "name": OVERALL_NAME if overall else Path(session).stem,
+            "name": name,
             "event": event,
             "eventName": _event_name(event),
         },
@@ -556,13 +646,16 @@ def _analysed(path: str, modified: float) -> pd.DataFrame:
 
 
 def _analysis_data(session: str) -> pd.DataFrame:
-    if _overall_event(session) is not None:
+    multi = _multi_paths(session)
+    if multi is not None and len(multi) != 1:
         raise HTTPException(
             400, "El análisis de carrera solo está disponible para una sesión concreta."
         )
-    path = _session_files().get(session)
+    path = multi[0] if multi else _session_files().get(session)
     if path is None:
         raise HTTPException(404, f"No existe la sesión «{session}».")
+    if _kind(path) != "analysis":
+        raise HTTPException(422, f"«{path.name}» no es un archivo de vueltas (Analysis).")
     try:
         return _analysed(str(path), path.stat().st_mtime)
     except Exception as error:
@@ -762,6 +855,79 @@ def analysis_drivers(
             for r in summary.itertuples()
         ],
     }
+
+
+# ---------------------------------------------------------------------------
+# Clasificación por horas (…_Classification_Race_Hour N.CSV de un mismo evento)
+# ---------------------------------------------------------------------------
+@lru_cache(maxsize=8)
+def _classification(signature: tuple[tuple[str, float], ...]) -> tuple[pd.DataFrame, list[str]]:
+    paths = [Path(p) for p, _ in signature]
+    df = load_classification(paths)
+    padded = {team: set(numbers) for team, numbers in _padded_for(paths[0])}
+    return restore_padded_numbers(df, padded)
+
+
+@app.get("/api/events/{event:path}/classification")
+def classification(event: str) -> dict:
+    """Evolución hora a hora: posición (general y en clase), vueltas, diferencias, ritmo
+    frente al líder de la clase y vuelta rápida de cada coche."""
+    paths = _event_files(event, kind="classification")
+    if not paths:
+        raise HTTPException(404, f"No hay clasificaciones por horas en «{event}».")
+    try:
+        df, notices = _classification(tuple((str(p), p.stat().st_mtime) for p in paths))
+    except Exception as error:
+        raise HTTPException(422, f"No se pudieron leer las clasificaciones: {error}") from error
+
+    last_hour = int(df["HOUR"].max())
+    final = df[df["HOUR"] == last_hour].set_index("NUMBER")["POSITION"]
+    cars = []
+    for number, rows in df.groupby("NUMBER", sort=False):
+        rows = rows.sort_values("HOUR")
+        last = rows.iloc[-1]
+        cars.append(
+            {
+                "number": number,
+                "team": _text(last.get("TEAM")),
+                "vehicle": _text(last.get("VEHICLE")),
+                "category": _text(last.get("CLASS")),
+                "tyres": _text(last.get("TYRES")),
+                "drivers": drivers_of(last),
+                "finalPosition": _int_or_none(final.get(number)),
+                "snapshots": [
+                    {
+                        "hour": int(r.HOUR),
+                        "position": _int_or_none(r.POSITION),
+                        "classPosition": int(r.CLASS_POSITION),
+                        "laps": _int_or_none(r.LAPS),
+                        "status": _text(getattr(r, "STATUS", "")),
+                        "totalTime": _num(r.TOTAL_SECONDS),
+                        "gapFirst": _text(getattr(r, "GAP_FIRST", "")),
+                        "gapSeconds": _num(r.GAP_SECONDS),
+                        "lapsDown": int(r.LAPS_DOWN),
+                        "leaderDelta": _num(r.LEADER_DELTA),
+                        "bestLap": _time(r.BEST_SECONDS),
+                        "bestLapNumber": _int_or_none(pd.to_numeric(getattr(r, "FL_LAPNUM", None), errors="coerce")),
+                    }
+                    for r in rows.itertuples()
+                ],
+            }
+        )
+    cars.sort(key=lambda c: (c["finalPosition"] is None, c["finalPosition"] or 0))
+    categories = list_categories(df[df["CLASS"] != ""]) if (df["CLASS"] != "").any() else []
+    return {
+        "event": event,
+        "eventName": _event_name(event),
+        "hours": sorted(int(h) for h in df["HOUR"].unique()),
+        "categories": [{"id": c, "label": CATEGORY_LABELS.get(c, c)} for c in categories],
+        "notices": notices,
+        "cars": cars,
+    }
+
+
+def _int_or_none(value) -> int | None:
+    return None if value is None or pd.isna(value) else int(value)
 
 
 if __name__ == "__main__":

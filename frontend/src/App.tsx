@@ -24,7 +24,12 @@ import {
   type PitStop,
   type RankingRow,
   type SessionInfo,
+  selectionId,
+  selectionIds,
+  type ClassificationEvent,
 } from "./api"
+import { ClassificationView } from "./ClassificationView"
+import { FilePicker } from "./FilePicker"
 import { useBoxZoom, ZOOM_HINT, type PlotFrame } from "./chartZoom"
 import { RaceAnalysisSection } from "./RaceAnalysis"
 import { loadRaceAnalysis, type AnalysisLap } from "./raceAnalysisData"
@@ -1028,10 +1033,12 @@ function Status({
   title,
   detail,
   busy = false,
+  children,
 }: {
   title: string
   detail?: string
   busy?: boolean
+  children?: ReactNode // acciones (p. ej. volver o elegir otros archivos)
 }) {
   return (
     <div className="app-shell">
@@ -1039,6 +1046,7 @@ function Status({
       <main className="status" role={busy ? "status" : "alert"}>
         <h1>{title}</h1>
         {detail && <p>{detail}</p>}
+        {children && <div className="status-actions">{children}</div>}
       </main>
       <Footer />
     </div>
@@ -1116,12 +1124,18 @@ function Landing({
   sessionId,
   onSession,
   onSelect,
+  onPickFiles,
+  classifications,
+  onClassification,
 }: {
   overview: Overview
   sessions: SessionInfo[]
   sessionId: string
   onSession: (id: string) => void
   onSelect: (category: string) => void
+  onPickFiles: () => void
+  classifications: ClassificationEvent[]
+  onClassification: (event: string) => void
 }) {
   return (
     <div className="app-shell landing-shell">
@@ -1142,7 +1156,26 @@ function Landing({
             value={sessionId}
             onChange={onSession}
           />
+          <button type="button" className="pick-files" onClick={onPickFiles}>
+            Elegir archivos…
+          </button>
         </div>
+        {classifications.length > 0 && (
+          <div className="hourly-strip">
+            {classifications.map((c) => (
+              <button type="button" key={c.event} onClick={() => onClassification(c.event)}>
+                <span className="event-icon">
+                  <Icon name="flag" />
+                </span>
+                <span>
+                  <small>CLASIFICACIÓN POR HORAS</small>
+                  <strong>{c.eventName}</strong>
+                </span>
+                <b>{c.files} archivos →</b>
+              </button>
+            ))}
+          </div>
+        )}
         <div className="category-grid">
           {overview.categories.map((category) => {
             const copy = categoryCopy[category.id] ?? fallbackCopy
@@ -1606,7 +1639,9 @@ function Dashboard({
   overall,
   onCategory,
   onHome,
+  onPickFiles,
 }: {
+  onPickFiles: () => void
   sessionId: string
   sessionName: string
   eventName: string
@@ -1780,6 +1815,9 @@ function Dashboard({
             category={category}
             categoryLabel={data.category.label}
           />
+          <button type="button" className="pick-files" onClick={onPickFiles}>
+            Archivos…
+          </button>
           <label className="filter-select">
             <span className="select-label">Vuelta lenta</span>
             <select value={slow} onChange={(event) => onSlow(Number(event.target.value))}>
@@ -2189,29 +2227,119 @@ export default function App() {
   }, [boot.data])
 
   const overview = useApi(sessionId ? () => api.overview(sessionId) : null, [sessionId])
+  const [picking, setPicking] = useState(false)
+  const [hourlyEvent, setHourlyEvent] = useState<string | null>(null)
+
+  // Una selección de varios archivos no está en la lista del backend: se añade para que
+  // el desplegable de sesión la muestre.
+  const sessions = useMemo<SessionInfo[]>(() => {
+    const list = boot.data?.sessions ?? []
+    const ov = overview.data
+    if (!sessionId || !selectionIds(sessionId) || !ov || list.some((s) => s.id === sessionId)) return list
+    return [
+      ...list,
+      {
+        id: sessionId,
+        name: ov.session.name,
+        overall: true,
+        event: ov.session.event,
+        eventName: ov.session.eventName,
+        categories: ov.categories.map((c) => c.id),
+      },
+    ]
+  }, [boot.data, overview.data, sessionId])
+
+  const firstSession = boot.data?.sessions.find((s) => !s.overall)?.id ?? boot.data?.sessions[0]?.id ?? null
+  const classifications = boot.data?.classifications ?? []
+  const openHourly = (event: string) => {
+    setPicking(false)
+    setHourlyEvent(event)
+  }
+  const picker =
+    picking && boot.data ? (
+      <FilePicker
+        files={boot.data.files ?? []}
+        classifications={classifications}
+        current={sessionId}
+        dataDir={boot.data.dataDir}
+        onAnalyze={(ids) => {
+          setPicking(false)
+          setHourlyEvent(null)
+          setCategory(null)
+          setSessionId(selectionId(ids))
+        }}
+        onClassification={openHourly}
+        onClose={() => setPicking(false)}
+      />
+    ) : null
+  const hourlyButtons = classifications.map((c) => (
+    <button key={c.event} type="button" className="primary-button" onClick={() => openHourly(c.event)}>
+      Clasificación por horas · {c.eventName}
+    </button>
+  ))
 
   if (boot.error) return <Status title="No se pudo conectar con el backend" detail={boot.error} />
   if (!boot.data) return <Status busy title="Conectando con el backend…" />
-  if (boot.data.sessions.length === 0) {
+
+  if (hourlyEvent) {
     return (
-      <Status
-        title="No hay sesiones para analizar"
-        detail={`No se han encontrado archivos CSV o Excel en ${boot.data.dataDir}`}
-      />
+      <div className="app-shell dashboard-shell">
+        <Header onHome={() => setHourlyEvent(null)} />
+        <main className="dashboard">
+          <ClassificationView event={hourlyEvent} onBack={() => setHourlyEvent(null)} />
+        </main>
+        <Footer />
+        {picker}
+      </div>
     )
   }
-  if (overview.error) return <Status title="No se pudo cargar la sesión" detail={overview.error} />
+
+  if (boot.data.sessions.length === 0) {
+    return (
+      <>
+        <Status
+          title="No hay sesiones de vueltas para analizar"
+          detail={`No hay archivos de vueltas (…_Analysis_….CSV) en ${boot.data.dataDir}.`}
+        >
+          {hourlyButtons}
+        </Status>
+        {picker}
+      </>
+    )
+  }
+  if (overview.error)
+    return (
+      <>
+        <Status title="No se pudo cargar la sesión" detail={overview.error}>
+          <button type="button" className="primary-button" onClick={() => setPicking(true)}>
+            Elegir otros archivos
+          </button>
+          {firstSession && firstSession !== sessionId && (
+            <button type="button" className="primary-button secondary" onClick={() => setSessionId(firstSession)}>
+              Volver a la primera sesión
+            </button>
+          )}
+        </Status>
+        {picker}
+      </>
+    )
   if (!sessionId || !overview.data) return <Status busy title="Importando la sesión…" />
 
   if (!category) {
     return (
-      <Landing
-        overview={overview.data}
-        sessions={boot.data.sessions}
-        sessionId={sessionId}
-        onSession={setSessionId}
-        onSelect={setCategory}
-      />
+      <>
+        <Landing
+          overview={overview.data}
+          sessions={sessions}
+          sessionId={sessionId}
+          onSession={setSessionId}
+          onSelect={setCategory}
+          onPickFiles={() => setPicking(true)}
+          classifications={classifications}
+          onClassification={openHourly}
+        />
+        {picker}
+      </>
     )
   }
 
@@ -2221,7 +2349,7 @@ export default function App() {
         sessionId={sessionId}
         sessionName={overview.data.session.name}
         eventName={overview.data.session.eventName}
-        sessions={boot.data.sessions}
+        sessions={sessions}
         onSession={setSessionId}
         slow={slow}
         onSlow={setSlow}
@@ -2230,7 +2358,9 @@ export default function App() {
         overall={overview.data.overall}
         onCategory={setCategory}
         onHome={() => setCategory(null)}
+        onPickFiles={() => setPicking(true)}
       />
+      {picker}
     </ErrorBoundary>
   )
 }

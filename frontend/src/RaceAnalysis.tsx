@@ -4,6 +4,7 @@
 
 import { useMemo, useState } from "react"
 import { formatLapTime, formatSigned } from "./api"
+import { CarChips, useCarPicker } from "./carPicker"
 import { carColor, gapTick, secs } from "./chartUtils"
 import { FuelCalculator } from "./FuelCalculator"
 import {
@@ -19,7 +20,6 @@ import { TraceChart, type TraceBand, type TraceLine } from "./TraceChart"
 
 const FCY_FILL = "rgba(255, 214, 10, 0.13)"
 const PIT_FILL = "rgba(169, 188, 210, 0.16)"
-const DEFAULT_VISIBLE = 8
 
 type YRange = "auto" | "30" | "60" | "120"
 
@@ -55,61 +55,6 @@ function pitBands(carLaps: AnalysisLap[]): TraceBand[] {
     labelColor: "#A9BCD2",
     bottom: true,
   }))
-}
-
-/** Selección de coches visibles con chips (por defecto los primeros + los fijos). */
-function useCarPicker(order: string[], always: string[]) {
-  const [picked, setPicked] = useState<string[] | null>(null)
-  const defaults = [...new Set([...order.slice(0, DEFAULT_VISIBLE), ...always.filter(Boolean)])]
-  const visible = (picked ?? defaults).filter((c) => order.includes(c))
-  return {
-    visible,
-    toggle: (car: string) =>
-      setPicked(visible.includes(car) ? visible.filter((c) => c !== car) : [...visible, car]),
-    all: () => setPicked(order),
-    top: () => setPicked(null),
-  }
-}
-
-function CarChips({
-  order,
-  teams,
-  picker,
-  marked,
-  markLabel,
-}: {
-  order: string[]
-  teams: Map<string, string>
-  picker: ReturnType<typeof useCarPicker>
-  marked: string
-  markLabel: string
-}) {
-  return (
-    <div className="gap-chips" role="group" aria-label="Coches visibles">
-      {order.map((car) => {
-        const on = picker.visible.includes(car)
-        return (
-          <button
-            key={car}
-            type="button"
-            className={`chip${on ? " on" : ""}${car === marked ? " ref" : ""}`}
-            aria-pressed={on}
-            onClick={() => picker.toggle(car)}
-            title={teams.get(car)}
-          >
-            <i style={{ background: carColor(order, car) }} />#{car}
-            {car === marked && <small>{markLabel}</small>}
-          </button>
-        )
-      })}
-      <button type="button" className="chip ghost" onClick={picker.all}>
-        Todos
-      </button>
-      <button type="button" className="chip ghost" onClick={picker.top}>
-        Top {DEFAULT_VISIBLE}
-      </button>
-    </div>
-  )
 }
 
 function TraceLegend({ pitCar }: { pitCar: string | null }) {
