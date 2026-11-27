@@ -584,7 +584,11 @@ export function RaceAnalysisSection({
   categoryLabel,
   sessionName,
   sessionId,
+  live,
+  onLive,
 }: {
+  live: boolean
+  onLive: (on: boolean) => void
   state: { data: RaceAnalysis | null; error: string | null; loading: boolean }
   overall: boolean
   focusCar: string | null
@@ -629,7 +633,14 @@ export function RaceAnalysisSection({
               </p>
             </div>
           )}
-          <StrategySection key={`strategy-${data.source}`} analysis={data} focusCar={focusCar} sessionId={sessionId} />
+          <StrategySection
+            key={`strategy-${data.source}`}
+            analysis={data}
+            focusCar={focusCar}
+            sessionId={sessionId}
+            live={live}
+            onLive={onLive}
+          />
           {race || forceDistance ? (
             <RaceDistance key={`dist-${data.source}`} analysis={data} focusCar={focusCar} />
           ) : (

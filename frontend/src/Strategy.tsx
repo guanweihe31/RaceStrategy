@@ -6,14 +6,23 @@ import { formatLapTime, formatSigned, useApi } from "./api"
 import { secs } from "./chartUtils"
 import { finishingOrder, loadSessionLaps, type AnalysisLap, type RaceAnalysis } from "./raceAnalysisData"
 import {
+  LIVE_REFRESH_MS,
+  NEUTRAL_DEFAULTS,
   RULE_PRESETS,
+  currentNeutralization,
   driverTimes,
   formatHours,
+  measuredSlowdown,
+  neutralDecision,
   observedFuelLaps,
   pitLossRange,
   pitWindow,
   trackPositions,
+  typicalPitLane,
   type DriveRules,
+  type NeutralDecision,
+  type NeutralKind,
+  type PitWindow,
   type TrackCar,
 } from "./strategyCalc"
 
@@ -34,13 +43,21 @@ export function StrategySection({
   analysis,
   focusCar,
   sessionId,
+  live,
+  onLive,
 }: {
   analysis: RaceAnalysis
   focusCar: string | null
   sessionId: string
+  live: boolean
+  onLive: (on: boolean) => void
 }) {
   // todas las clases (el tráfico de otras clases cuenta al salir de boxes)
-  const all = useApi(analysis.source === "api" ? () => loadSessionLaps(sessionId) : null, [sessionId, analysis.source])
+  const all = useApi(
+    analysis.source === "api" ? () => loadSessionLaps(sessionId) : null,
+    [sessionId, analysis.source],
+    live ? LIVE_REFRESH_MS : null,
+  )
   const allLaps = analysis.source === "api" ? (all.data ?? analysis.laps) : analysis.laps
 
   const order = useMemo(() => finishingOrder(analysis.laps), [analysis.laps])
@@ -54,7 +71,8 @@ export function StrategySection({
   const firstLap = carLaps[0]?.lap ?? 1
   const lastLap = carLaps[carLaps.length - 1]?.lap ?? 1
   const [lapPick, setLapPick] = useState<number | null>(null)
-  const lap = lapPick !== null && lapPick >= firstLap && lapPick <= lastLap ? lapPick : lastLap
+  // en vivo siempre la última vuelta
+  const lap = !live && lapPick !== null && lapPick >= firstLap && lapPick <= lastLap ? lapPick : lastLap
   const now = carLaps.find((l) => l.lap === lap)?.elapsed ?? 0
 
   const maxElapsed = Math.max(0, ...analysis.laps.map((l) => l.elapsed ?? 0))
@@ -95,8 +113,14 @@ export function StrategySection({
             min={firstLap}
             max={lastLap}
             value={lap}
+            disabled={live}
             onChange={(e) => setLapPick(Number(e.target.value))}
           />
+        </label>
+        <label className={`check live-toggle${live ? " on" : ""}`} title="Recarga los datos cada 15 s y sigue la última vuelta (para usar con el colector de LMU)">
+          <input type="checkbox" checked={live} onChange={(e) => onLive(e.target.checked)} />
+          <span className="live-dot" aria-hidden="true" />
+          En vivo
         </label>
         <label className="fuel-field strategy-hours">
           <span>Duración de la carrera</span>
@@ -114,8 +138,208 @@ export function StrategySection({
       </div>
 
       <DriverTimePanel key={`dt-${car}`} carLaps={carLaps} now={now} raceEnd={raceEnd} />
-      <PitWindowPanel key={`pw-${car}`} car={car} carLaps={carLaps} allLaps={allLaps} lap={lap} now={now} raceEnd={raceEnd} />
+      <CarPlan key={`plan-${car}`} car={car} carLaps={carLaps} allLaps={allLaps} lap={lap} now={now} raceEnd={raceEnd} live={live} />
     </section>
+  )
+}
+
+// Ajustes de parada compartidos por el asistente de neutralizaciones y la ventana.
+function CarPlan(props: {
+  car: string
+  carLaps: AnalysisLap[]
+  allLaps: AnalysisLap[]
+  lap: number
+  now: number
+  raceEnd: number
+  live: boolean
+}) {
+  const { carLaps, lap, raceEnd } = props
+  const observedFuel = useMemo(() => observedFuelLaps(carLaps), [carLaps])
+  const observedLoss = useMemo(() => pitLossRange(carLaps), [carLaps])
+  const [fuelLaps, setFuelLaps] = useState<number>(observedFuel ?? 15)
+  const [loss, setLoss] = useState<{ min: number; max: number }>(
+    observedLoss ? { min: Math.round(observedLoss.min), max: Math.round(observedLoss.max) } : { min: 60, max: 90 },
+  )
+  const win = useMemo(() => pitWindow(carLaps, lap, fuelLaps, raceEnd), [carLaps, lap, fuelLaps, raceEnd])
+  const shared = { ...props, fuelLaps, setFuelLaps, loss, setLoss, win, observedFuel, observedLoss }
+  return (
+    <>
+      <NeutralAssistant {...shared} />
+      <PitWindowPanel {...shared} />
+    </>
+  )
+}
+
+type PlanProps = {
+  car: string
+  carLaps: AnalysisLap[]
+  allLaps: AnalysisLap[]
+  lap: number
+  now: number
+  raceEnd: number
+  live: boolean
+  fuelLaps: number
+  setFuelLaps: (v: number) => void
+  loss: { min: number; max: number }
+  setLoss: (v: { min: number; max: number }) => void
+  win: PitWindow | null
+  observedFuel: number | null
+  observedLoss: { min: number; max: number } | null
+}
+
+// ---------------------------------------------------------------------------
+// Asistente: ¿parar si sale ahora FCY / VSC / Safety Car?
+// ---------------------------------------------------------------------------
+const VERDICT_TEXT: Record<NeutralDecision["verdict"], string> = {
+  must: "PARA YA",
+  pit: "PARA",
+  marginal: "DUDOSO",
+  stay: "QUÉDATE FUERA",
+}
+
+function NeutralAssistant({ car, carLaps, allLaps, lap, now, fuelLaps, loss, win, live }: PlanProps) {
+  const measured = useMemo(() => measuredSlowdown(allLaps), [allLaps])
+  const measuredPitLane = useMemo(() => typicalPitLane(carLaps), [carLaps])
+  const [pitLane, setPitLane] = useState<number>(() => Math.round(measuredPitLane ?? Math.max(loss.max + 10, 70)))
+  const [params, setParams] = useState(() =>
+    Object.fromEntries(
+      (Object.keys(NEUTRAL_DEFAULTS) as NeutralKind[]).map((k) => [
+        k,
+        { slow: Number((measured[k]?.factor ?? NEUTRAL_DEFAULTS[k].slow).toFixed(2)), duration: NEUTRAL_DEFAULTS[k].duration, open: true },
+      ]),
+    ) as Record<NeutralKind, { slow: number; duration: number; open: boolean }>,
+  )
+  const [showParams, setShowParams] = useState(false)
+  const lossGreen = (loss.min + loss.max) / 2
+  const refLap = win?.lapTime ?? 100
+  const current = useMemo(() => currentNeutralization(allLaps, now, refLap), [allLaps, now, refLap])
+  const positions = useMemo(() => trackPositions(allLaps, now, car, refLap), [allLaps, now, car, refLap])
+
+  const decisions = (Object.keys(NEUTRAL_DEFAULTS) as NeutralKind[]).map((kind) => {
+    const d = neutralDecision({
+      kind,
+      slow: params[kind].slow,
+      duration: params[kind].duration,
+      pitLaneOpen: params[kind].open,
+      pitLane,
+      lossGreen,
+      win,
+      fuelLaps,
+    })
+    // con quién saldría (distancia en pista a ritmo de carrera, como en el mapa)
+    const wrap = (b: number) => b + refLap * Math.max(0, Math.round((d.lossNeutral - b) / refLap))
+    const near = positions
+      .filter((p) => p.car !== car)
+      .map((p) => ({ ...p, diff: wrap(p.behind) - d.lossNeutral }))
+      .sort((a, b) => Math.abs(a.diff) - Math.abs(b.diff))
+      .slice(0, 3)
+      .sort((a, b) => a.diff - b.diff)
+    return { ...d, near }
+  })
+  const set = (kind: NeutralKind, patch: Partial<{ slow: number; duration: number; open: boolean }>) =>
+    setParams({ ...params, [kind]: { ...params[kind], ...patch } })
+
+  return (
+    <article className={`panel race-panel neutral-assistant${current ? " active" : ""}`}>
+      <div className="panel-heading race-heading">
+        <div>
+          <h2>Asistente de parada con FCY / VSC / Safety Car · #{car}</h2>
+          <p>
+            Si saliera ahora mismo (al final de la vuelta {lap}), ¿compensa parar? Se recalcula con
+            cada vuelta{live ? " y cada 15 s en vivo" : ""}: parar con bandera cuesta menos porque los
+            demás van lentos mientras estás en boxes.
+          </p>
+        </div>
+        <button type="button" className="chip ghost" onClick={() => setShowParams(!showParams)}>
+          {showParams ? "Ocultar parámetros" : "Parámetros"}
+        </button>
+      </div>
+
+      {current && (
+        <div className="neutral-now" role="alert">
+          <b>{current} EN CURSO</b> en la vuelta {lap}: decisión destacada abajo.
+        </div>
+      )}
+
+      {showParams && (
+        <div className="neutral-params">
+          <label className="fuel-field">
+            <span>Tiempo en el pit lane (PIT_TIME)</span>
+            <span className="fuel-input">
+              <input type="number" min={5} step={1} value={pitLane} onChange={(e) => Number(e.target.value) > 0 && setPitLane(Number(e.target.value))} />
+              <small>s</small>
+            </span>
+          </label>
+          {(Object.keys(NEUTRAL_DEFAULTS) as NeutralKind[]).map((kind) => (
+            <div className="neutral-param-row" key={kind}>
+              <strong>{kind}</strong>
+              <label className="fuel-field">
+                <span>Vuelta {kind} / vuelta verde{measured[kind] ? ` (medido ${measured[kind]!.factor.toFixed(2)}, ${measured[kind]!.samples} v.)` : ""}</span>
+                <span className="fuel-input">
+                  <input type="number" min={1} step={0.1} value={params[kind].slow} onChange={(e) => Number(e.target.value) >= 1 && set(kind, { slow: Number(e.target.value) })} />
+                  <small>×</small>
+                </span>
+              </label>
+              <label className="fuel-field">
+                <span>Duración esperada</span>
+                <span className="fuel-input">
+                  <input type="number" min={0} step={30} value={params[kind].duration} onChange={(e) => set(kind, { duration: Math.max(0, Number(e.target.value) || 0) })} />
+                  <small>s</small>
+                </span>
+              </label>
+              <label className="check fuel-check">
+                <input type="checkbox" checked={params[kind].open} onChange={(e) => set(kind, { open: e.target.checked })} />
+                Pit lane abierto
+              </label>
+            </div>
+          ))}
+          <p className="chart-note">
+            La pérdida en verde ({Math.round(lossGreen)} s) y las vueltas por depósito ({fuelLaps}) son las de
+            la ventana de parada (abajo). Comprueba en el reglamento si el pit lane se cierra con cada
+            bandera.
+          </p>
+        </div>
+      )}
+
+      <div className="neutral-cards">
+        {decisions.map((d) => (
+          <div key={d.kind} className={`neutral-card v-${d.verdict}${current === d.kind ? " current" : ""}`}>
+            <div className="neutral-card-head">
+              <span>
+                <strong>{d.kind}</strong>
+                <small>{NEUTRAL_DEFAULTS[d.kind].label}</small>
+              </span>
+              <b className="verdict">{VERDICT_TEXT[d.verdict]}</b>
+            </div>
+            <div className="neutral-gain">
+              {d.verdict === "must" ? "sin combustible" : `${d.gain >= 0 ? "gana" : "pierde"} ${secs(Math.abs(d.gain), 0)} s`}
+              <small> frente a parar luego en verde</small>
+            </div>
+            <ul>
+              {d.reasons.map((r) => (
+                <li key={r}>{r}</li>
+              ))}
+            </ul>
+            {d.near.length > 0 && (
+              <p className="neutral-near">
+                Saldría cerca de{" "}
+                {d.near.map((n, i) => (
+                  <span key={n.car}>
+                    {i > 0 && ", "}
+                    <b>#{n.car}</b> <small>({n.category}, {n.diff >= 0 ? "delante" : "detrás"} {secs(Math.abs(n.diff), 0)} s)</small>
+                  </span>
+                ))}
+              </p>
+            )}
+          </div>
+        ))}
+      </div>
+      <p className="chart-note">
+        Ganancia = coste de la próxima parada en verde − (parada ahora con bandera + paradas extra que
+        obligue). «Dudoso» = menos de 5 s de diferencia. No tiene en cuenta neumáticos ni posiciones
+        perdidas en la cola del Safety Car.
+      </p>
+    </article>
   )
 }
 
@@ -293,23 +517,14 @@ function PitWindowPanel({
   allLaps,
   lap,
   now,
-  raceEnd,
-}: {
-  car: string
-  carLaps: AnalysisLap[]
-  allLaps: AnalysisLap[]
-  lap: number
-  now: number
-  raceEnd: number
-}) {
-  const observedFuel = useMemo(() => observedFuelLaps(carLaps), [carLaps])
-  const observedLoss = useMemo(() => pitLossRange(carLaps), [carLaps])
-  const [fuelLaps, setFuelLaps] = useState<number>(observedFuel ?? 15)
-  const [loss, setLoss] = useState<{ min: number; max: number }>(
-    observedLoss ? { min: Math.round(observedLoss.min), max: Math.round(observedLoss.max) } : { min: 60, max: 90 },
-  )
-
-  const win = useMemo(() => pitWindow(carLaps, lap, fuelLaps, raceEnd), [carLaps, lap, fuelLaps, raceEnd])
+  fuelLaps,
+  setFuelLaps,
+  loss,
+  setLoss,
+  win,
+  observedFuel,
+  observedLoss,
+}: PlanProps) {
   const refLap = win?.lapTime ?? 100
   const positions = useMemo(() => trackPositions(allLaps, now, car, refLap), [allLaps, now, car, refLap])
   const focus = positions.find((p) => p.car === car)

@@ -1222,3 +1222,40 @@ summary:focus-visible,
   .gantt-row { grid-template-columns: 110px 1fr; }
   .gantt-axis { margin-left: 120px; }
 }
+/* ---- Asistente de parada con FCY / VSC / Safety Car ---- */
+.live-toggle { align-self: center; padding: 8px 12px; border: 1px solid #1f3044; border-radius: 999px; }
+.live-toggle .live-dot { width: 9px; height: 9px; border-radius: 50%; background: #3a4d63; }
+.live-toggle.on { border-color: #ff3b3b; color: #fff; }
+.live-toggle.on .live-dot { background: #ff3b3b; animation: live-pulse 1.2s ease-in-out infinite; }
+@keyframes live-pulse { 50% { opacity: 0.3; } }
+.lap-slider input:disabled { opacity: 0.5; }
+.neutral-assistant.active { border-color: rgba(255, 214, 10, 0.6); box-shadow: 0 0 0 1px rgba(255, 214, 10, 0.25); }
+.neutral-now { background: rgba(255, 214, 10, 0.14); border: 1px solid rgba(255, 214, 10, 0.5); color: #ffe066; border-radius: 4px; padding: 8px 12px; font-size: 13px; margin-bottom: 10px; }
+.neutral-now b { letter-spacing: 0.06em; }
+.neutral-params { display: grid; gap: 10px; margin-bottom: 12px; padding: 12px; background: #0f1924; border: 1px solid #1a2938; border-radius: 4px; }
+.neutral-params > .fuel-field { max-width: 240px; }
+.neutral-param-row { display: grid; grid-template-columns: 50px minmax(0, 1.4fr) minmax(0, 1fr) auto; gap: 12px; align-items: end; }
+.neutral-param-row > strong { align-self: center; color: #ffe066; font: 700 12px 'Space Mono', monospace; }
+.neutral-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.neutral-card { border: 1px solid #1f3044; border-radius: 5px; padding: 12px 14px; background: #0f1924; border-top-width: 4px; }
+.neutral-card.v-pit, .neutral-card.v-must { border-top-color: #5bd19f; }
+.neutral-card.v-stay { border-top-color: #ff6b6b; }
+.neutral-card.v-marginal { border-top-color: #ffb454; }
+.neutral-card.current { outline: 2px solid #ffd60a; outline-offset: 2px; }
+.neutral-card-head { display: flex; justify-content: space-between; align-items: start; gap: 8px; }
+.neutral-card-head strong { display: block; font: 700 16px 'Space Mono', monospace; color: #e6eef7; }
+.neutral-card-head small { color: #7d92a8; font-size: 11px; }
+.verdict { font: 700 13px 'Space Mono', monospace; letter-spacing: 0.06em; padding: 4px 8px; border-radius: 3px; white-space: nowrap; }
+.v-pit .verdict, .v-must .verdict { background: rgba(91, 209, 159, 0.18); color: #5bd19f; }
+.v-must .verdict { background: #5bd19f; color: #0d1621; }
+.v-stay .verdict { background: rgba(255, 107, 107, 0.16); color: #ff6b6b; }
+.v-marginal .verdict { background: rgba(255, 180, 84, 0.16); color: #ffb454; }
+.neutral-gain { font: 400 20px 'Space Mono', monospace; color: #e6eef7; margin: 10px 0 6px; }
+.neutral-gain small { font: 400 11px 'Inter', sans-serif; color: #7d92a8; }
+.neutral-card ul { margin: 0; padding-left: 16px; color: #b4c3d3; font-size: 12px; line-height: 1.5; }
+.neutral-near { margin: 8px 0 0; color: #9fb0c2; font-size: 12px; line-height: 1.5; }
+.neutral-near small { color: #7d92a8; }
+@media (max-width: 900px) {
+  .neutral-cards { grid-template-columns: 1fr; }
+  .neutral-param-row { grid-template-columns: 1fr 1fr; }
+}

@@ -32,6 +32,7 @@ import { ClassificationView } from "./ClassificationView"
 import { FilePicker } from "./FilePicker"
 import { useBoxZoom, ZOOM_HINT, type PlotFrame } from "./chartZoom"
 import { RaceAnalysisSection } from "./RaceAnalysis"
+import { LIVE_REFRESH_MS } from "./strategyCalc"
 import { loadRaceAnalysis, type AnalysisLap } from "./raceAnalysisData"
 
 // ---------------------------------------------------------------------------
@@ -1667,9 +1668,12 @@ function Dashboard({
     [sessionId, selectedCar, slow],
   )
   // Análisis de carrera (tráfico, gaps, degradación en aire limpio): solo sesiones concretas.
+  // En vivo (p. ej. con el colector de LMU escribiendo): se recarga cada 15 s sin vaciar.
+  const [live, setLive] = useState(false)
   const race = useApi(
     overall ? null : () => loadRaceAnalysis(sessionId, category),
     [sessionId, category, overall],
+    live ? LIVE_REFRESH_MS : null,
   )
   const carAnalysisLaps = useMemo(
     () =>
@@ -2155,6 +2159,8 @@ function Dashboard({
         )}
         <RaceAnalysisSection
           state={race}
+          live={live}
+          onLive={setLive}
           overall={overall}
           focusCar={selectedCar}
           categoryLabel={data.category.label}

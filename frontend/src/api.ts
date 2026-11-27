@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 
 // URL del backend. Para cambiarla: VITE_API_URL=http://otro-host:8000 en un .env
 const BASE = (import.meta.env?.VITE_API_URL as string | undefined) ?? "http://localhost:8000"
@@ -313,12 +313,38 @@ export const api = {
 // ---------------------------------------------------------------------------
 type State<T> = { data: T | null; error: string | null; loading: boolean }
 
-export function useApi<T>(load: (() => Promise<T>) | null, deps: unknown[]): State<T> {
+// `refreshMs`: vuelve a pedir el dato cada X ms SIN vaciarlo mientras llega (modo en
+// vivo: la pantalla no parpadea ni pierde el zoom). Un fallo puntual no borra el dato.
+export function useApi<T>(
+  load: (() => Promise<T>) | null,
+  deps: unknown[],
+  refreshMs: number | null = null,
+): State<T> {
   const [state, setState] = useState<State<T>>({
     data: null,
     error: null,
     loading: load !== null,
   })
+  const loadRef = useRef(load)
+  loadRef.current = load
+
+  useEffect(() => {
+    if (!refreshMs) return
+    let cancelled = false
+    const timer = setInterval(() => {
+      const current = loadRef.current
+      if (!current) return
+      current()
+        .then((data) => {
+          if (!cancelled) setState({ data, error: null, loading: false })
+        })
+        .catch(() => {})
+    }, refreshMs)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [refreshMs])
 
   useEffect(() => {
     if (!load) {

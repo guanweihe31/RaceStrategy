@@ -10,6 +10,9 @@ import { median, pitStopBreakdown, type AnalysisLap } from "./raceAnalysisData"
 
 const H = 3600
 
+/** Cada cuánto se recargan los datos en modo en vivo. */
+export const LIVE_REFRESH_MS = 15_000
+
 // ---------------------------------------------------------------------------
 // Reglas de tiempo de conducción
 // ---------------------------------------------------------------------------
@@ -230,6 +233,128 @@ export function pitLossRange(carLaps: AnalysisLap[]): { min: number; max: number
     .map((s) => s.netLoss!)
   if (!losses.length) return null
   return { min: Math.min(...losses), max: Math.max(...losses) }
+}
+
+// ---------------------------------------------------------------------------
+// Asistente de parada con FCY / VSC / Safety Car
+// ---------------------------------------------------------------------------
+// Bajo neutralización todos ruedan más lentos (factor `slow` = vuelta neutralizada /
+// vuelta en verde), pero el pit lane tiene el mismo límite de velocidad. Mientras uno
+// está en boxes los demás recorren menos pista, así que al volver a verde se ha perdido
+// menos distancia. Medido en "segundos de pista a ritmo de carrera":
+//   verde:          pérdida = T − b                       (T = tiempo en el pit lane,
+//   neutralizado:   pérdida = T·p/slow + T·(1−p) − b        b = lo que se tarda en pista en
+//                                                           recorrer ese tramo en verde,
+//                                                           p = parte de la parada bajo bandera)
+export type NeutralKind = "FCY" | "VSC" | "SC"
+
+export const NEUTRAL_DEFAULTS: Record<NeutralKind, { label: string; slow: number; duration: number }> = {
+  FCY: { label: "Full Course Yellow", slow: 2.6, duration: 240 },
+  VSC: { label: "Virtual Safety Car", slow: 1.6, duration: 150 },
+  SC: { label: "Safety Car", slow: 2.2, duration: 600 },
+}
+
+function neutralKind(flag: string): NeutralKind | null {
+  const f = flag.toUpperCase()
+  if (f.includes("VSC")) return "VSC"
+  if (f === "SC" || f.includes("SAFETY")) return "SC"
+  if (f.includes("FCY") || f === "Y" || f.includes("YELLOW")) return "FCY"
+  return null
+}
+
+/** Factor de lentitud medido en los datos: vueltas enteras bajo bandera (la anterior
+ * también lo estaba) frente al ritmo en verde de cada coche. */
+export function measuredSlowdown(allLaps: AnalysisLap[]): Partial<Record<NeutralKind, { factor: number; samples: number }>> {
+  const byCar = new Map<string, AnalysisLap[]>()
+  for (const l of allLaps) byCar.set(l.car, [...(byCar.get(l.car) ?? []), l])
+  const ratios: Record<NeutralKind, number[]> = { FCY: [], VSC: [], SC: [] }
+  byCar.forEach((laps) => {
+    const sorted = [...laps].sort((a, b) => a.lap - b.lap)
+    const green = median(sorted.filter((l) => l.is_green_racing && l.lap_time).map((l) => l.lap_time!))
+    if (!green) return
+    sorted.forEach((l, i) => {
+      const kind = l.is_neutralized ? neutralKind(l.flag) : null
+      if (!kind || !l.lap_time || l.is_in_lap || l.is_out_lap || !sorted[i - 1]?.is_neutralized) return
+      ratios[kind].push(l.lap_time / green)
+    })
+  })
+  const out: Partial<Record<NeutralKind, { factor: number; samples: number }>> = {}
+  for (const kind of Object.keys(ratios) as NeutralKind[]) {
+    const m = median(ratios[kind])
+    if (m && ratios[kind].length >= 3 && m > 1.05) out[kind] = { factor: m, samples: ratios[kind].length }
+  }
+  return out
+}
+
+/** Neutralización en curso en `now`: la bandera de la mayoría de los coches que
+ * cruzaron la meta en la última vuelta. */
+export function currentNeutralization(allLaps: AnalysisLap[], now: number, refLap: number): NeutralKind | null {
+  const recent = allLaps.filter((l) => l.elapsed !== null && l.elapsed <= now && l.elapsed > now - refLap)
+  if (recent.length < 2) return null
+  const neutral = recent.filter((l) => l.is_neutralized && neutralKind(l.flag))
+  if (neutral.length * 2 < recent.length) return null
+  const counts = new Map<NeutralKind, number>()
+  neutral.forEach((l) => counts.set(neutralKind(l.flag)!, (counts.get(neutralKind(l.flag)!) ?? 0) + 1))
+  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0]
+}
+
+/** Tiempo típico en el pit lane (PIT_TIME) de las paradas en verde del coche. */
+export function typicalPitLane(carLaps: AnalysisLap[]): number | null {
+  return median(
+    pitStopBreakdown(carLaps)
+      .filter((s) => !s.underNeutralization && s.pitLane !== null && s.pitLane > 5 && s.pitLane < 300)
+      .map((s) => s.pitLane!),
+  )
+}
+
+export type NeutralDecision = {
+  kind: NeutralKind
+  lossGreen: number
+  lossNeutral: number
+  extraStops: number
+  gain: number // s que se ganan parando ahora frente a parar luego en verde (+ = conviene)
+  verdict: "must" | "pit" | "marginal" | "stay"
+  reasons: string[]
+}
+
+export function neutralDecision(opts: {
+  kind: NeutralKind
+  slow: number
+  duration: number
+  pitLaneOpen: boolean
+  pitLane: number // T
+  lossGreen: number // pérdida neta en verde
+  win: PitWindow | null
+  fuelLaps: number
+}): NeutralDecision {
+  const { kind, slow, duration, pitLaneOpen, pitLane, lossGreen, win, fuelLaps } = opts
+  const bypass = Math.max(0, pitLane - lossGreen)
+  const p = pitLane > 0 ? Math.min(1, duration / pitLane) : 1
+  const lossNeutral = Math.max(0, (pitLane * p) / Math.max(1, slow) + pitLane * (1 - p) - bypass)
+  const label = NEUTRAL_DEFAULTS[kind].label
+  const reasons = [
+    `Con ${kind} la parada cuesta ~${Math.round(lossNeutral)} s en vez de ${Math.round(lossGreen)} s (ahorro ${Math.round(lossGreen - lossNeutral)} s).`,
+  ]
+  if (!win) return { kind, lossGreen, lossNeutral, extraStops: 0, gain: 0, verdict: "marginal", reasons: [...reasons, "Sin datos suficientes para la ventana."] }
+
+  const baseline = win.stopsNeeded
+  const after = Math.max(0, Math.ceil((win.remainingLaps - fuelLaps) / fuelLaps))
+  const extraStops = 1 + after - baseline
+  const gain = baseline * lossGreen - (lossNeutral + after * lossGreen)
+
+  if (!pitLaneOpen) {
+    return { kind, lossGreen, lossNeutral, extraStops, gain, verdict: "stay", reasons: [`Pit lane cerrado con ${label}: no se puede parar.`] }
+  }
+  if (win.fuelLeft <= 1 && baseline > 0) {
+    return { kind, lossGreen, lossNeutral, extraStops, gain, verdict: "must", reasons: [...reasons, "Sin combustible para otra vuelta: hay que parar ya."] }
+  }
+  if (baseline === 0) reasons.push(`Llega al final sin parar: parar ahora es una parada de más (+${Math.round(lossNeutral)} s).`)
+  else if (extraStops <= 0) reasons.push(`Parar ahora no añade paradas: quedan ${baseline} en cualquier caso.`)
+  else reasons.push(`Parar ahora obliga a ${extraStops} parada${extraStops > 1 ? "s" : ""} más después (+${Math.round(extraStops * lossGreen)} s en verde).`)
+  if (win.open !== null && win.lap < win.open) reasons.push(`La ventana normal abre en la vuelta ${win.open}.`)
+  else if (win.close !== null) reasons.push(`Dentro de la ventana (cierra en la vuelta ${win.close}).`)
+  const verdict = gain > 5 ? "pit" : gain < -5 ? "stay" : "marginal"
+  return { kind, lossGreen, lossNeutral, extraStops, gain, verdict, reasons }
 }
 
 export function formatHours(seconds: number): string {
