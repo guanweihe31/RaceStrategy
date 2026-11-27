@@ -131,6 +131,11 @@ export async function loadRaceAnalysis(session: string, category: string): Promi
   }
 }
 
+/** Vueltas de todas las clases de la sesión (para ver el tráfico de otras clases). */
+export async function loadSessionLaps(session: string): Promise<AnalysisLap[]> {
+  return (await get<LapsResponse>(`/api/sessions/${encPath(session)}/analysis/laps`)).laps
+}
+
 // ---------------------------------------------------------------------------
 // Utilidades numéricas
 // ---------------------------------------------------------------------------

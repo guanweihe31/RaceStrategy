@@ -7,6 +7,7 @@ import { formatLapTime, formatSigned } from "./api"
 import { CarChips, useCarPicker } from "./carPicker"
 import { carColor, gapTick, secs } from "./chartUtils"
 import { FuelCalculator } from "./FuelCalculator"
+import { StrategySection } from "./Strategy"
 import {
   finishingOrder,
   gapsTo,
@@ -582,12 +583,14 @@ export function RaceAnalysisSection({
   focusCar,
   categoryLabel,
   sessionName,
+  sessionId,
 }: {
   state: { data: RaceAnalysis | null; error: string | null; loading: boolean }
   overall: boolean
   focusCar: string | null
   categoryLabel: string
   sessionName: string
+  sessionId: string
 }) {
   const { data } = state
   const [forceDistance, setForceDistance] = useState(false)
@@ -626,6 +629,7 @@ export function RaceAnalysisSection({
               </p>
             </div>
           )}
+          <StrategySection key={`strategy-${data.source}`} analysis={data} focusCar={focusCar} sessionId={sessionId} />
           {race || forceDistance ? (
             <RaceDistance key={`dist-${data.source}`} analysis={data} focusCar={focusCar} />
           ) : (

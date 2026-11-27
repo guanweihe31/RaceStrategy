@@ -2159,6 +2159,7 @@ function Dashboard({
           focusCar={selectedCar}
           categoryLabel={data.category.label}
           sessionName={sessionName}
+          sessionId={sessionId}
         />
       </main>
       <Footer sessionName={sessionName} eventName={eventName} />
